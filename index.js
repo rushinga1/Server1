@@ -63,7 +63,8 @@ const transporter = nodemailer.createTransport({
   logger: true,
   connectionTimeout: 10000, // 10 seconds
   greetingTimeout: 10000,
-  socketTimeout: 10000
+  socketTimeout: 10000,
+  family: 4
 })
 
 // In-memory OTP store
