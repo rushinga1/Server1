@@ -1,0 +1,102 @@
+datasource db {
+  provider = "postgresql"
+}
+
+generator client {
+  provider        = "prisma-client-js"
+  previewFeatures = ["driverAdapters"]
+}
+
+model User {
+  id          String   @id @default(uuid())
+  email       String?  @unique
+  phone       String?  @unique
+  role        String   @default("client") // 'worker' or 'client'
+  name        String?
+  firstName   String?
+  lastName    String?
+  district    String?
+  sector      String?
+  cell        String?
+  village     String?
+  houseNumber String?
+  category    String?  // Ubudehe category
+  status      String   @default("active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  
+  // Relations
+  payments    Payment[]
+  reminders   Reminder[]
+  collections Collection[] @relation("ClientCollections")
+  managedBy   Collection[] @relation("WorkerCollections")
+
+  // Messaging & Registration Tracking
+  registeredById String?
+  registeredBy   User?   @relation("WorkerRegistrations", fields: [registeredById], references: [id])
+  registeredUsers User[]  @relation("WorkerRegistrations")
+
+  sentMessages     Message[] @relation("SentMessages")
+  receivedMessages Message[] @relation("ReceivedMessages")
+}
+
+model Payment {
+  id            String   @id @default(uuid())
+  amount        Float
+  service       String
+  method        String
+  status        String   @default("pending")
+  transactionId String?
+  date          DateTime @default(now())
+  
+  // Relation
+  userId        String?
+  user          User?    @relation(fields: [userId], references: [id])
+}
+
+model Reminder {
+  id          String   @id @default(uuid())
+  title       String
+  description String
+  type        String
+  date        DateTime
+  recurring   Boolean  @default(false)
+  priority    String   @default("medium")
+  
+  // Relation
+  userId      String?
+  user        User?    @relation(fields: [userId], references: [id])
+}
+
+model Collection {
+  id        String   @id @default(uuid())
+  date      DateTime @default(now())
+  notes     String?
+  
+  // Relations
+  clientId  String
+  client    User     @relation("ClientCollections", fields: [clientId], references: [id])
+  
+  workerId  String
+  worker    User     @relation("WorkerCollections", fields: [workerId], references: [id])
+}
+
+model Message {
+  id         String   @id @default(uuid())
+  text       String
+  senderId   String
+  sender     User     @relation("SentMessages", fields: [senderId], references: [id])
+  receiverId String
+  receiver   User     @relation("ReceivedMessages", fields: [receiverId], references: [id])
+  read       Boolean  @default(false)
+  createdAt  DateTime @default(now())
+}
+
+model Announcement {
+  id          String   @id @default(uuid())
+  title       String
+  content     String
+  type        String   @default("info")
+  author      String
+  date        DateTime @default(now())
+}
