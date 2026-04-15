@@ -5,14 +5,32 @@ const nodemailer = require('nodemailer')
 const { PrismaClient } = require('@prisma/client')
 const { Pool } = require('pg')
 const { PrismaPg } = require('@prisma/adapter-pg')
+const dns = require('dns')
+
+// FORCE IPv4 to avoid ENETUNREACH errors on cloud platforms like Render
+if (dns.setDefaultResultOrder) {
+  dns.setDefaultResultOrder('ipv4first')
+}
 
 dotenv.config()
 
 const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 const adapter = new PrismaPg(pool)
 const prisma = new PrismaClient({ adapter })
-const app = express()
 const PORT = process.env.PORT || 4000
+console.log('--- SERVER STARTUP ---')
+console.log('PORT:', PORT)
+console.log('DATABASE_URL present:', !!process.env.DATABASE_URL)
+console.log('SMTP_USER:', process.env.SMTP_USER)
+console.log('--- END STARTUP ---')
+
+const app = express()
+
+// GLOBAL LOGGING MIDDLEWARE
+app.use((req, res, next) => {
+  console.log(`>>> ${req.method} ${req.url} from ${req.ip}`)
+  next()
+})
 
 app.use(express.json())
 app.use(cors({
@@ -40,7 +58,12 @@ const transporter = nodemailer.createTransport({
   },
   tls: {
     rejectUnauthorized: false
-  }
+  },
+  debug: true,
+  logger: true,
+  connectionTimeout: 10000, // 10 seconds
+  greetingTimeout: 10000,
+  socketTimeout: 10000
 })
 
 // In-memory OTP store
@@ -60,6 +83,7 @@ function isValidEmail(email) {
 // ============================================================
 app.post('/api/otp/send', async (req, res) => {
   const { email } = req.body
+  console.log(`[OTP] Request received for: ${email}`)
   if (!email || !isValidEmail(email)) {
     return res.status(400).json({ success: false, message: 'A valid email address is required.' })
   }
@@ -68,6 +92,7 @@ app.post('/api/otp/send', async (req, res) => {
   // --- NEW: Check if user exists in DB first ---
   try {
     const user = await prisma.user.findUnique({ where: { email: normalizedEmail } })
+    console.log(`[OTP] User found: ${user ? 'Yes' : 'No'}`)
     if (!user) {
       return res.status(404).json({ 
         success: false, 
@@ -79,10 +104,12 @@ app.post('/api/otp/send', async (req, res) => {
     return res.status(500).json({ success: false, message: 'Internal server error.' })
   }
 
+  console.log(`[OTP] Generating OTP for ${normalizedEmail}...`)
   const otp = generateOTP()
   const expiresAt = Date.now() + OTP_EXPIRY_MS
   otpStore.set(normalizedEmail, { otp, expiresAt })
 
+  console.log(`[OTP] Attempting to send mail to ${normalizedEmail}...`)
   try {
     await transporter.sendMail({
       from: `"Agruni Portal" <${process.env.SMTP_USER}>`,
