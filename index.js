@@ -42,7 +42,8 @@ app.use(cors({
 const smtpUser = process.env.SMTP_USER || ''
 const smtpHost = process.env.SMTP_HOST || (smtpUser.toLowerCase().endsWith('@gmail.com') ? 'smtp.gmail.com' : '')
 const smtpPort = Number(process.env.SMTP_PORT || 587)
-const smtpSecure = process.env.SMTP_SECURE === 'true'
+// Port 465 requires secure: true, Port 587 requires secure: false
+const smtpSecure = smtpPort === 465 ? true : (process.env.SMTP_SECURE === 'true')
 
 if (!smtpHost) {
   console.warn('[SMTP] SMTP_HOST is missing. Set SMTP_HOST in .env (e.g., smtp.gmail.com).')
