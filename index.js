@@ -38,6 +38,9 @@ const transporter = nodemailer.createTransport({
     user: smtpUser,
     pass: process.env.SMTP_PASS,
   },
+  tls: {
+    rejectUnauthorized: false
+  }
 })
 
 // In-memory OTP store
@@ -100,7 +103,12 @@ app.post('/api/otp/send', async (req, res) => {
     console.log(`[OTP] Sent to ${normalizedEmail}`)
     return res.json({ success: true, message: 'OTP sent successfully.' })
   } catch (error) {
-    console.error('[OTP] Send email error:', error)
+    console.error('[OTP] CRITICAL ERROR details:', {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      stack: error.stack
+    })
     return res.status(500).json({ success: false, message: 'Failed to send email. Please try again or check your SMTP settings.' })
   }
 })
