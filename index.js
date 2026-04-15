@@ -1,16 +1,9 @@
 const express = require('express')
 const cors = require('cors')
 const dotenv = require('dotenv')
-const nodemailer = require('nodemailer')
 const { PrismaClient } = require('@prisma/client')
 const { Pool } = require('pg')
 const { PrismaPg } = require('@prisma/adapter-pg')
-const dns = require('dns')
-
-// FORCE IPv4 to avoid ENETUNREACH errors on cloud platforms like Render
-if (dns.setDefaultResultOrder) {
-  dns.setDefaultResultOrder('ipv4first')
-}
 
 dotenv.config()
 
@@ -18,10 +11,11 @@ const pool = new Pool({ connectionString: process.env.DATABASE_URL })
 const adapter = new PrismaPg(pool)
 const prisma = new PrismaClient({ adapter })
 const PORT = process.env.PORT || 4000
+
 console.log('--- SERVER STARTUP ---')
 console.log('PORT:', PORT)
 console.log('DATABASE_URL present:', !!process.env.DATABASE_URL)
-console.log('SMTP_USER:', process.env.SMTP_USER)
+console.log('RESEND_API_KEY present:', !!process.env.RESEND_API_KEY)
 console.log('--- END STARTUP ---')
 
 const app = express()
@@ -38,35 +32,39 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'DELETE'],
 }))
 
-// --- Nodemailer Setup ---
-const smtpUser = process.env.SMTP_USER || ''
-const smtpHost = process.env.SMTP_HOST || (smtpUser.toLowerCase().endsWith('@gmail.com') ? 'smtp.gmail.com' : '')
-const smtpPort = Number(process.env.SMTP_PORT || 587)
-// Port 465 requires secure: true, Port 587 requires secure: false
-const smtpSecure = smtpPort === 465 ? true : (process.env.SMTP_SECURE === 'true')
+// ============================================================
+// RESEND EMAIL API SETUP
+// ============================================================
+async function sendEmail({ to, subject, html, text }) {
+  const RESEND_API_KEY = process.env.RESEND_API_KEY
+  
+  if (!RESEND_API_KEY) {
+    throw new Error('RESEND_API_KEY is missing in environment variables.')
+  }
 
-if (!smtpHost) {
-  console.warn('[SMTP] SMTP_HOST is missing. Set SMTP_HOST in .env (e.g., smtp.gmail.com).')
+  const response = await fetch('https://api.resend.com/emails', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${RESEND_API_KEY}`
+    },
+    body: JSON.stringify({
+      from: 'Agruni Portal <onboarding@resend.dev>', // Default Resend address for sandbox
+      to,
+      subject,
+      html: html || text,
+      text: text || ''
+    })
+  })
+
+  const data = await response.json()
+  
+  if (!response.ok) {
+    throw new Error(`Resend API Error: ${data.message || response.statusText}`)
+  }
+  
+  return data
 }
-
-const transporter = nodemailer.createTransport({
-  host: smtpHost,
-  port: smtpPort,
-  secure: smtpSecure,
-  auth: {
-    user: smtpUser,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false
-  },
-  debug: true,
-  logger: true,
-  connectionTimeout: 10000, // 10 seconds
-  greetingTimeout: 10000,
-  socketTimeout: 10000,
-  family: 4
-})
 
 // In-memory OTP store
 const otpStore = new Map()
@@ -113,11 +111,9 @@ app.post('/api/otp/send', async (req, res) => {
 
   console.log(`[OTP] Attempting to send mail to ${normalizedEmail}...`)
   try {
-    await transporter.sendMail({
-      from: `"Agruni Portal" <${process.env.SMTP_USER}>`,
+    const result = await sendEmail({
       to: normalizedEmail,
       subject: 'Your Agruni Verification Code',
-      text: `Your AGRUNI verification code is: ${otp}\n\nIt is valid for 5 minutes. Do not share this code with anyone.`,
       html: `
         <div style="font-family: Arial, sans-serif; max-width: 500px; margin: 0 auto; color: #333;">
           <h2 style="color: #1e40af;">Agruni Verification</h2>
@@ -129,16 +125,14 @@ app.post('/api/otp/send', async (req, res) => {
         </div>
       `
     })
-    console.log(`[OTP] Sent to ${normalizedEmail}`)
+    console.log(`[OTP] Sent via Resend:`, result.id)
     return res.json({ success: true, message: 'OTP sent successfully.' })
   } catch (error) {
     console.error('[OTP] CRITICAL ERROR details:', {
       message: error.message,
-      code: error.code,
-      command: error.command,
       stack: error.stack
     })
-    return res.status(500).json({ success: false, message: 'Failed to send email. Please try again or check your SMTP settings.' })
+    return res.status(500).json({ success: false, message: 'Failed to send email. Please try again or check your email configuration.' })
   }
 })
 
