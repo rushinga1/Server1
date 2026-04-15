@@ -21,12 +21,21 @@ app.use(cors({
 }))
 
 // --- Nodemailer Setup ---
+const smtpUser = process.env.SMTP_USER || ''
+const smtpHost = process.env.SMTP_HOST || (smtpUser.toLowerCase().endsWith('@gmail.com') ? 'smtp.gmail.com' : '')
+const smtpPort = Number(process.env.SMTP_PORT || 587)
+const smtpSecure = process.env.SMTP_SECURE === 'true'
+
+if (!smtpHost) {
+  console.warn('[SMTP] SMTP_HOST is missing. Set SMTP_HOST in .env (e.g., smtp.gmail.com).')
+}
+
 const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT || 587,
-  secure: process.env.SMTP_SECURE === 'true',
+  host: smtpHost,
+  port: smtpPort,
+  secure: smtpSecure,
   auth: {
-    user: process.env.SMTP_USER,
+    user: smtpUser,
     pass: process.env.SMTP_PASS,
   },
 })
