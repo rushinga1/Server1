@@ -1,6 +1,7 @@
 const express = require('express')
 const cors = require('cors')
 const dotenv = require('dotenv')
+const nodemailer = require('nodemailer')
 const { PrismaClient } = require('@prisma/client')
 const { Pool } = require('pg')
 const { PrismaPg } = require('@prisma/adapter-pg')
@@ -35,12 +36,150 @@ app.use(cors({
 // ============================================================
 // RESEND EMAIL API SETUP
 // ============================================================
+let smtpTransporter = null
+
+function hasSmtpConfig() {
+  return Boolean(process.env.SMTP_HOST && process.env.SMTP_PORT && process.env.SMTP_USER && process.env.SMTP_PASS)
+}
+
+function getEmailProvider() {
+  return (process.env.EMAIL_PROVIDER || 'resend').toLowerCase().trim()
+}
+
+function toBase64Url(input) {
+  return Buffer.from(input)
+    .toString('base64')
+    .replace(/\+/g, '-')
+    .replace(/\//g, '_')
+    .replace(/=+$/g, '')
+}
+
+async function getGmailAccessToken() {
+  const clientId = process.env.GMAIL_CLIENT_ID
+  const clientSecret = process.env.GMAIL_CLIENT_SECRET
+  const refreshToken = process.env.GMAIL_REFRESH_TOKEN
+
+  if (!clientId || !clientSecret || !refreshToken) {
+    throw new Error('Gmail API config is incomplete. Set GMAIL_CLIENT_ID, GMAIL_CLIENT_SECRET, and GMAIL_REFRESH_TOKEN.')
+  }
+
+  const tokenResponse = await fetch('https://oauth2.googleapis.com/token', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      client_id: clientId,
+      client_secret: clientSecret,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    }),
+  })
+
+  const tokenData = await tokenResponse.json()
+
+  if (!tokenResponse.ok || !tokenData.access_token) {
+    throw new Error(`Gmail token exchange failed: ${tokenData.error_description || tokenData.error || tokenResponse.statusText}`)
+  }
+
+  return tokenData.access_token
+}
+
+async function sendViaGmailApi({ to, subject, html, text }) {
+  const sender = process.env.GMAIL_SENDER
+  if (!sender) {
+    throw new Error('GMAIL_SENDER is missing for Gmail API provider.')
+  }
+
+  const accessToken = await getGmailAccessToken()
+  const plainText = text || 'Your verification code is ready. Please use the code shown in the email body.'
+  const bodyHtml = html || `<div>${plainText}</div>`
+
+  const rawMessage = [
+    `From: Agruni Portal <${sender}>`,
+    `To: ${to}`,
+    `Subject: ${subject}`,
+    'MIME-Version: 1.0',
+    'Content-Type: multipart/alternative; boundary="otp-boundary"',
+    '',
+    '--otp-boundary',
+    'Content-Type: text/plain; charset="UTF-8"',
+    '',
+    plainText,
+    '',
+    '--otp-boundary',
+    'Content-Type: text/html; charset="UTF-8"',
+    '',
+    bodyHtml,
+    '',
+    '--otp-boundary--',
+  ].join('\r\n')
+
+  const sendResponse = await fetch('https://gmail.googleapis.com/gmail/v1/users/me/messages/send', {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${accessToken}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({ raw: toBase64Url(rawMessage) }),
+  })
+
+  const sendData = await sendResponse.json()
+
+  if (!sendResponse.ok) {
+    throw new Error(`Gmail API send failed: ${sendData.error?.message || sendResponse.statusText}`)
+  }
+
+  return { provider: 'gmail_api', id: sendData.id }
+}
+
+function getSmtpTransporter() {
+  if (smtpTransporter) return smtpTransporter
+
+  smtpTransporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT),
+    secure: process.env.SMTP_SECURE === 'true',
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS,
+    },
+  })
+
+  return smtpTransporter
+}
+
 async function sendEmail({ to, subject, html, text }) {
+  const provider = getEmailProvider()
+
+  if (provider === 'gmail_api') {
+    return sendViaGmailApi({ to, subject, html, text })
+  }
+
+  if (provider === 'smtp' || (provider === 'auto' && hasSmtpConfig())) {
+    if (!hasSmtpConfig()) {
+      throw new Error('EMAIL_PROVIDER is smtp but SMTP_* variables are incomplete.')
+    }
+
+    const transporter = getSmtpTransporter()
+    const smtpFrom = process.env.SMTP_FROM || process.env.SMTP_USER
+
+    const result = await transporter.sendMail({
+      from: `Agruni Portal <${smtpFrom}>`,
+      to,
+      subject,
+      html: html || undefined,
+      text: text || undefined,
+    })
+
+    return { provider: 'smtp', id: result.messageId }
+  }
+
   const RESEND_API_KEY = process.env.RESEND_API_KEY
   
   if (!RESEND_API_KEY) {
-    throw new Error('RESEND_API_KEY is missing in environment variables.')
+    throw new Error('No email provider configured. Set SMTP_* variables or RESEND_API_KEY.')
   }
+
+  const resendFrom = process.env.RESEND_FROM || 'Agruni Portal <onboarding@resend.dev>'
 
   const response = await fetch('https://api.resend.com/emails', {
     method: 'POST',
@@ -49,7 +188,7 @@ async function sendEmail({ to, subject, html, text }) {
       'Authorization': `Bearer ${RESEND_API_KEY}`
     },
     body: JSON.stringify({
-      from: 'Agruni Portal <onboarding@resend.dev>', // Default Resend address for sandbox
+      from: resendFrom,
       to,
       subject,
       html: html || text,
@@ -60,10 +199,14 @@ async function sendEmail({ to, subject, html, text }) {
   const data = await response.json()
   
   if (!response.ok) {
-    throw new Error(`Resend API Error: ${data.message || response.statusText}`)
+    const resendMessage = data?.message || response.statusText
+    if (/testing emails|own email address|verify (a )?domain|sandbox/i.test(resendMessage)) {
+      throw new Error(`Resend configuration issue: ${resendMessage}`)
+    }
+    throw new Error(`Resend API Error: ${resendMessage}`)
   }
   
-  return data
+  return { provider: 'resend', id: data?.id }
 }
 
 // In-memory OTP store
@@ -125,14 +268,17 @@ app.post('/api/otp/send', async (req, res) => {
         </div>
       `
     })
-    console.log(`[OTP] Sent via Resend:`, result.id)
+    console.log(`[OTP] Sent via ${result.provider}:`, result.id)
     return res.json({ success: true, message: 'OTP sent successfully.' })
   } catch (error) {
     console.error('[OTP] CRITICAL ERROR details:', {
       message: error.message,
       stack: error.stack
     })
-    return res.status(500).json({ success: false, message: 'Failed to send email. Please try again or check your email configuration.' })
+    return res.status(500).json({
+      success: false,
+      message: 'Failed to send email. Please check SMTP/Resend configuration and sender domain verification.'
+    })
   }
 })
 
